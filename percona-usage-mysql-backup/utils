@@ -1,0 +1,16 @@
+#!/bin/bash
+
+find_files_in_dir_with_given_ext() {
+  if (( "$#" < 2 )); then
+    echo "syntax: find_files_in_dir_with_given_ext <base-dir> <extension>"
+    echo "usage_1: find_files_in_dir_with_given_ext data/backups/mysql/base xbcrypt
+    echo "usage_2: find_files_in_dir_with_given_ext /data/backups/mysql/inc4 lz4
+    exit 1
+  fi
+
+  # Positional Parameters
+  BASE_DIRECTORY="$1"
+  EXTENSION_NAME="$2"
+
+  echo $(find "${BASE_DIRECTORY}" -iname "*\.${EXTENSION_NAME}")
+}
