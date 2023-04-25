@@ -1,16 +1,75 @@
 #!/bin/bash
 
-find_files_in_dir_with_given_ext() {
-  if (( "$#" < 2 )); then
-    echo "syntax: find_files_in_dir_with_given_ext <base-dir> <extension>"
-    echo "usage_1: find_files_in_dir_with_given_ext data/backups/mysql/base xbcrypt
-    echo "usage_2: find_files_in_dir_with_given_ext /data/backups/mysql/inc4 lz4
+function log_to_file() {
+  local message="${1}"
+  local log_file="${2}"
+  echo "${message}" >> "${log_file}"
+}
+
+function is_int() {
+  local input="$1"
+  local int_regex='^[0-9]+$'
+  if ! [[ "${input}" =~ ${int_regex} ]] ; then
+    echo false
+  else
+    echo true
+  fi
+}
+
+function spread_list() {
+  local list=( "$@" )
+  for list_element in "${list[@]}"; do
+    printf "%s\n" "${list_element}"
+  done
+}
+
+function split_and_get_last_element() {
+  local input_string="${1}"
+  local delimiter="${2}"
+  echo "$(printf "%s" "${input_string}" | rev | cut -d"${delimiter}" -f1 | rev)"
+}
+
+function check_params() {
+  local script_name="${1}"
+  local min_required_params="${2}"
+  local received_params="${3}"
+  local syntax_description="${4}"
+  local usage_description="${5}"
+  local log_file="${6}"
+
+  local log_placeholder=(
+    "Log for the script: \"$(split_and_get_last_element "${script_name}" "/")\""
+    "Minimum Required Parameters: ${min_required_params}"
+    "Total Received Parameters: ${received_params}"
+  )
+
+  local are_params_sufficient=true
+  if (( min_required_params != received_params )) ; then
+    are_params_sufficient=false
+    log_placeholder+=(
+      "_._"
+      " |"
+      " | ${syntax_description}"
+      " | ${usage_description}"
+      "_|_"
+      " "
+    )
+  fi
+
+  # Declaring variable to avoid masking returns
+  local full_log;
+  full_log="$(spread_list "${log_placeholder[@]}")"
+
+  if (( $# == 6 )) ; then
+    echo "${full_log}" >> "${log_file}"
+  else
+    echo "${full_log}" >&1
+  fi
+
+  if [ "${are_params_sufficient}" == false ] ; then
+    echo "Error: expected parameters and sent-in parameters have NOT matched for the script"
     exit 1
   fi
 
-  # Positional Parameters
-  BASE_DIRECTORY="$1"
-  EXTENSION_NAME="$2"
-
-  echo $(find "${BASE_DIRECTORY}" -iname "*\.${EXTENSION_NAME}")
+  echo "Success: expected parameters and sent-in parameters have matched for the script"
 }

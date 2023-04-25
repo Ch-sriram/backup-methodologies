@@ -331,16 +331,15 @@ xtrabackup \
 --target-dir=/backups/db/mysql/dumps/cycle_1_dumps/full_backup/ 2> /backups/db/mysql/logs/xtrabackup_log | ssh backup "cat - > "/backups/db/mysql/dumps/cycle_1_dumps/full_backup/dump.xbstream""
 ```
 
-Incremental Backups:
-
-```bash
-sudo xtrabackup --defaults-file=/etc/mysql/root.cnf --backup --compress --encrypt=AES256 --encrypt-key-file=/home/vagrant/experiment/keyfile --stream=xbstream --target-dir=/home/vagrant/backup/mysql/inc1 --incremental-lsn=18234576 --extra-lsndir=/home/vagrant/backup/mysql/lsndir > dump.xbstream
-```
-
 ## Preparing Backup & Restoring
 
-**_NOTE: Documentation is yet to be completed for this section._**
+If the backup is made from encrypt, compress & stream the data, then the 1st step would be to decrypt, decompress & get the backup data using the `--decrypt` & `--decompress` options. The option `--remove-original`
 
 ```bash
-xtrabackup --decrypt=AES256 --encrypt-key-file=/home/vagrant/backups/mysql/keyfile --decompress --remove-original --target-dir=.
+xtrabackup \
+--decrypt=AES256 \
+--encrypt-key-file=/home/vagrant/backups/mysql/keyfile \
+--decompress \
+--remove-original \
+--target-dir=.
 ```

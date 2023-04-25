@@ -1,0 +1,49 @@
+#!/bin/bash
+
+: '
+  THIS SCRIPT IS NOT COMPLETED YET
+'
+
+# Input Parameters
+BASE_DIR="$1"       #  Directory path to decrypt & decompress
+KEYFILE_PATH="$2"   #  Path to the encryption keyfile
+
+if (("$#" < 2)); then
+  echo "syntax: ./decrypt_decompress <basedir> <keyfile-path>"
+  echo "usage: ./decrypt_decompress /backups/db/mysql/dumps/cycle_1_dumps/full_backup /backups/db/mysql/keyfile"
+  exit 1
+fi
+
+# Global Variables
+TARGET_BASE="/backups/db/mysql/"
+XBSTREAM_SEARCH_PATTERN="*.xbstream"
+XBSTREAM_FILES=$(ls "${BASE_DIR}" | grep -E "${XBSTREAM_SEARCH_PATTERN}")
+
+ALL_XBSTREAM_FILES=$(echo "${XBSTREAM_FILES}" | wc -l)
+
+if (( "${ALL_XBSTREAM_FILES}" <= 0 )); then
+  echo "Error: No stream files ('.xbstream') found. Please check backup logs for more information."
+  exit 1
+elif (( "${ALL_XBSTREAM_FILES}" > 1 )); then
+  echo "Error: More than one stream file found. Only a single stream file ('.xbstream') allowed to be in a single directory."
+  exit 1
+fi
+
+if [[ $(echo "${XBSTREAM_FILES}" | wc -l) -eq 1 ]]; then
+  echo "Found a stream file: ${XBSTREAM_FILES}."
+  RESTORE_DIR="${TARGET_BASE}/restore/$(echo "${BASE_DIR}" | rev | cut -f1,2- -d"/" | rev)"
+  mkdir -p "${RESTORE_DIR}"
+  
+  echo "Extracting the stream..."
+  xbstream -x -C "${RESTORE_DIR}" < "${BASE_DIR}/dump.xbstream"
+fi
+
+# Default decompression is done by qpress
+XTRABACKUP_ARGUMENTS=(
+  "--decrypt"
+  "--encrypt-key-file=${KEYFILE_PATH}"
+  "--decompress"
+  "--remove-original"
+)
+
+xtrabackup "${XTRABACKUP_ARGUMENTS[@]}" --target-dir="${RESTORE_DIR}" 2> "${TARGET_BASE}/logs/decrypt_decompress.log"

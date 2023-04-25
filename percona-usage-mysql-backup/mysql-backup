@@ -1,0 +1,251 @@
+#!/bin/bash
+
+: '
+This script is used for taking a full/incremental backup of a mysql 8+ database on to a remote machine.
+It also removes any backup cycles which are older than a certain maximum no of cycles.
+
+--
+The script should be run with the following syntax:
+
+./encrypt_compress_backup <backup-user-name> <dest-host> <keyfile-path> <cycle-size> <max-cycles-to-keep>
+
+--
+Example usage:
+
+./encrypt_compress_backup backup backup_server /backups/db/mysql/keyfile 14 5
+
+- <backup-user-name> is "backup" --> User named "backup" needs to be setup as part of the mysql group, and need to be a superuser.
+                                     Also, they need to have privileges of backing up mysql database [see "set_backup.sql" for more information]
+
+- <dest-host> is "backup_server" --> This is the name of the backup server we want to store the dumps into.
+                                     In this case, the name of the host is "backup_server", and the host can be found in "/etc/hosts" along with its public IP.
+                                     If the host does not exist at "/etc/hosts", then add it there along with its public IP.
+                                     NOTE: Make sure that the public key of the backup server is with wherever this script runs.
+                                           Also, the public key of this machine should be present at the backup server as well
+
+- <keyfile-path> is "/backups/db/mysql/keyfile" --> This is a path to the keyfile. This keyfile is necessary to decrypt the dump stored in the backup server.
+                                                    A keyfile can be generated using the following guide: https://docs.percona.com/percona-xtrabackup/8.0/xtrabackup_bin/backup.encrypting.html#create-encrypted-backups
+                                                    NOTE: The keyfile can be any aplha-numeric value generated/created/imagined by the client running this script.
+
+- <cycle-size> is "14" --> In a single cycle, there will only be a single full backup, rest all will be incremental backups. The cycle size is mentioned in days.
+                           Therefore in this case, one single backup cycle is of 14 days. There will be a new backup cycle created after every 14 days.
+                           The 1st backup of the new cycle, would always be a full backup, and the remaining backups would be incremental no matter how many.
+
+- <max-cycles-to-keep> is "5" --> How many recent backup cycles do we always want to have in the backup server (or <dest-host>)?
+                                  In this case, its 5 cycles that we want to keep, this means that there will only be last 5 cycle dumps available at the <dest-host>.
+                                  For example, if a cycle is of 14 days, then the max no of days that a full 5 cycle data will exist only till 14 * 5 = 70 days. On the 71st day, the oldest cycle backup will be deleted.
+
+--
+IMPORTANT NOTES
+---------------
+
+1. Make sure that a user named "backup" exists. 
+2. The "backup" user should be granted BACKUP_ADMIN privilege as well as some more privileges by MySQL admin to successfully run this script.
+
+'
+
+SCRIPT_NAME="${0}"
+RECEIVED_PARAMS="$#"
+
+function set_global_constants() {
+  # echo "set_global_constants" # Debug
+  FULL="full"
+  INCREMENTAL="incremental"
+
+  THREADS="$(nproc --all)"
+  CURRENT_YEAR_DATE_MONTH="$(date +%Y-%m-%d)"
+  CURRENT_TIMESTAMP="$(date +%Y-%m-%d_%H-%M-%S)"
+
+  # Backup Log Files & Dump Directory Details
+  BASE_DIRECTORY="/backups/db/mysql"
+  BASE_DUMP_DIRECTORY="${BASE_DIRECTORY}/dumps"
+  BASE_LOGS_DIRECTORY="${BASE_DIRECTORY}/logs"
+  TODAYS_DIRECTORY="${BASE_DUMP_DIRECTORY}/cycle_${CURRENT_YEAR_DATE_MONTH}"
+  TODAYS_LOGS_DIR="${BASE_LOGS_DIRECTORY}/logs_${CURRENT_YEAR_DATE_MONTH}"
+  BACKUP_LOG_FILE="${TODAYS_LOGS_DIR}/encrypt_compress_backup_${CURRENT_TIMESTAMP}.log"
+  SSH_LOG_FILE="${TODAYS_LOGS_DIR}/ssh_${CURRENT_TIMESTAMP}.log"
+}
+
+function import_utils() {
+  BASE_SCRIPTS_DIRECTORY="${BASE_DIRECTORY}/scripts"
+  source "${BASE_SCRIPTS_DIRECTORY}/utils"
+}
+
+function setup_log_directories() {
+  # echo "setup_log_directories" # Debug
+  mkdir -p "${TODAYS_LOGS_DIR}"
+  touch "${BACKUP_LOG_FILE}"
+  touch "${SSH_LOG_FILE}"
+}
+
+function do_sanity_check() {
+  # echo "do_sanity_check" # Debug
+  # Declaring variable to avoid masking returns: https://www.shellcheck.net/wiki/SC2155
+  local minimal_script_name;
+  minimal_script_name="$(split_and_get_last_element "${SCRIPT_NAME}" "/")"
+  local min_required_params=5
+  local syntax_description="syntax: ./${minimal_script_name} <backup-user-name> <dest-host> <keyfile-path> <cycle-size> <max-cycles-to-keep>"
+  local usage_description="usage: ./${minimal_script_name} backup backup_server /backups/db/mysql/keyfile 14 5"
+
+  local all_parameters=( "${SCRIPT_NAME}" "${min_required_params}" "${RECEIVED_PARAMS}" "${syntax_description}" "${usage_description}" "${BACKUP_LOG_FILE}" )
+  check_params "${all_parameters[@]}"
+}
+
+function set_input_parameters() {
+  # echo "set_input_parameters" # Debug
+  BACKUP_USER="${1}"          #  Name of the user who's backing up this data.
+                              #+ NOTE: Make sure that the user config exists at /etc/mysql/<BACKUP_USER>.cnf
+
+  DEST_HOST="${2}"            #  Destination host-name/IP to be given here.
+                              #+ If host-name is used, make sure to add the host in "/etc/hosts" file along with their respective IP address.
+
+  KEY_FILE="${3}"             #  Path to the encryption keyfile, so that the same keyfile can be used for decryption as well.
+
+  CYCLE_SIZE="${4}"           #  Size of each cycle of complete full backup and also the subsequent incremental backups.
+                              #+ The recommendation is to use 2 week cycle. CYCLE_SIZE=7 => 1 week is a backup cycle.
+
+  MAX_CYCLES_TO_KEEP="${5}"   #  If given as 4, data will only be kept for 4 cycles. After 4 cycles, data will be automatically deleted.
+}
+
+function set_global_variables() {
+  # echo "set_global_variables" # Debug
+  DEFAULTS_FILE="/etc/mysql/${BACKUP_USER}.cnf"
+  SECONDS_IN_A_DAY=86400
+  MAX_DAYS=$((CYCLE_SIZE * MAX_CYCLES_TO_KEEP))
+  MAX_DAYS_AGO_DATE="$(date --date="${MAX_DAYS} days ago" +%Y-%m-%d)"
+  MAX_ALLOWED_DIR_CYCLE_EPOCH="$(date -d "${MAX_DAYS_AGO_DATE}" +%s)"
+}
+
+function purge_backups_older_than_max_days() {
+  # echo "purge_backups_older_than_max_days" # Debug
+  log_to_file "Finding all backups (\"cycle_*\" directories) which are older than ${MAX_DAYS} days" "${BACKUP_LOG_FILE}"
+
+  # Declaring variable to avoid masking returns: https://www.shellcheck.net/wiki/SC2155
+  local dir_cycle_date;
+  local dir_cycle_epoch;
+  local diff_days;
+  local cycle_dump_directories;
+
+  # Find all directories which start with the name "cycle"
+  local search_dir_pattern="cycle*"
+  cycle_dump_directories="$(find "${BASE_DUMP_DIRECTORY}" -iname "${search_dir_pattern}" -type d -printf '%T@ %p\n' | sort -n | cut -f2 -d" ")"
+
+  # Remove all directories which are older than $MAX_ALLOWED_DIR_CYCLE_EPOCH
+  for dir in $cycle_dump_directories;
+  do
+    dir_cycle_date="$(echo "$dir" | cut -d "_" -f 2)"
+    dir_cycle_epoch="$(date -d "${dir_cycle_date}" +%s)"
+    diff_days=$(( ( MAX_ALLOWED_DIR_CYCLE_EPOCH - dir_cycle_epoch ) / SECONDS_IN_A_DAY ))
+    if (( diff_days > MAX_DAYS )) ; then
+      log_to_file "Removing ${dir}" "${BACKUP_LOG_FILE}"
+      rm -rf "${dir}"
+    fi
+  done
+}
+
+# BACKUP_TYPE global variable is set from this function
+function check_incremental_or_full() {
+  # echo "check_incremental_or_full" # Debug
+  log_to_file "Is the backup full/incremental?" "${BACKUP_LOG_FILE}"
+
+  # Declaring variable to avoid masking returns: https://www.shellcheck.net/wiki/SC2155
+  local check_date;
+  local check_dir;
+
+  local is_incremental_backup=false
+  CURRENT_CYCLE_DIR="${TODAYS_DIRECTORY}"
+
+  # If there's a directory b/w the current date & previous $CYCLE_SIZE days, then backup is incremental, otherwise it's a full backup
+  for (( i=0; i<=CYCLE_SIZE; i++ ))
+  do
+    check_date="$(date --date="${i} days ago" +%Y-%m-%d)"
+    check_dir="${BASE_DUMP_DIRECTORY}/cycle_${check_date}"
+    if [ -d "${check_dir}" ] ; then
+      is_incremental_backup=true
+      CURRENT_CYCLE_DIR="cycle_${check_date}"
+      break
+    fi
+  done
+
+  BACKUP_TYPE="$([ "${is_incremental_backup}" == true ] && echo "${INCREMENTAL}" || echo "${FULL}")"
+  log_to_file "backup_type: ${BACKUP_TYPE}" "${BACKUP_LOG_FILE}"
+}
+
+# XTRABACKUP_ARGUMENTS is a global variable which entails base options for percona-xtrabackup utility
+function set_base_xtrabackup_arguments() {
+  # echo "set_base_xtrabackup_arguments" # Debug
+  XTRABACKUP_ARGUMENTS=(
+    "--defaults-file=${DEFAULTS_FILE}"
+    "--backup"
+    "--compress"
+    "--stream=xbstream"
+    "--encrypt=AES256"
+    "--encrypt-key-file=${KEY_FILE}"
+    "--parallel=${THREADS}"
+    "--compress-threads=${THREADS}"
+    "--encrypt-threads=${THREADS}"
+  )
+}
+
+function set_remaining_xtrabackup_arguments() {
+  # echo "set_remaining_xtrabackup_arguments" # Debug
+  # Declaring variables to avoid masking returns: https://www.shellcheck.net/wiki/SC2155
+  local previous_backup_directory;
+  local current_cycle_directory_full_path;
+  local incremental_dir_name;
+  local int_or_string;
+
+  local backup_directory_name="${BACKUP_TYPE}_backup"
+  local search_dir_pattern="*backup*"
+
+  if [ "${BACKUP_TYPE}" = "${INCREMENTAL}" ] ; then
+    current_cycle_directory_full_path="${BASE_DUMP_DIRECTORY}/${CURRENT_CYCLE_DIR}"
+    log_to_file "Taking an incremental backup for ${current_cycle_directory_full_path}" "${BACKUP_LOG_FILE}"
+    previous_backup_directory="$(find "${current_cycle_directory_full_path}" -iname "${search_dir_pattern}" -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2 -d" ")"
+
+    # The name of the previous_backup_directory can either be "increment_backup_<int>" or "full_backup".
+    # We get the last word (which is an int/string), if it's not an int, then we take the first incremental backup at "incremental_backup_1"
+    # Or if it's an int, then we take an incremental backup at "incremental_backup_<int_or_string+1>" (which can be "incremental_backup_2", "incremental_backup_3", etc)
+    int_or_string="$(echo "${previous_backup_directory}" | rev | cut -f1 -d"_" | rev)"
+    incremental_dir_name="$([ "$(is_int "${int_or_string}")" = true ] && echo "${backup_directory_name}_$(( int_or_string + 1 ))" || echo "${backup_directory_name}_1")"
+
+    TARGET_DIR="${current_cycle_directory_full_path}/${incremental_dir_name}"
+    XTRABACKUP_ARGUMENTS+=( "--incremental-basedir=${previous_backup_directory}" )
+  else # BACKUP_TYPE is full
+    log_to_file "Taking a full backup for ${TODAYS_DIRECTORY}" "${BACKUP_LOG_FILE}"
+    TARGET_DIR="${TODAYS_DIRECTORY}/${backup_directory_name}"
+  fi
+
+  mkdir -p "${TARGET_DIR}"
+  DEST_DIR="${TARGET_DIR}/dump.xbstream"
+  XTRABACKUP_ARGUMENTS+=( "--extra-lsndir=${TARGET_DIR}" "--target-dir=${TARGET_DIR}" )
+}
+
+
+function take_backup() {
+  # echo "take_backup" # Debug
+  ssh -v "${DEST_HOST}" "mkdir -p \"${TARGET_DIR}\"" 2> "${SSH_LOG_FILE}"
+  sudo -u "${BACKUP_USER}" xtrabackup "${XTRABACKUP_ARGUMENTS[@]}" 2>> "${BACKUP_LOG_FILE}" | ssh -v "${DEST_HOST}" "cat - > \"${DEST_DIR}\"" 2>> "${SSH_LOG_FILE}"
+}
+
+ALL_INPUT_PARAMETERS=(
+  "${1}" # BACKUP_USER
+  "${2}" # DEST_HOST
+  "${3}" # KEY_FILE
+  "${4}" # CYCLE_SIZE
+  "${5}" # MAX_CYCLES_TO_KEEP
+)
+
+# echo "given args: ${ALL_INPUT_PARAMETERS[*]}" # Debug
+
+set_global_constants \
+&& import_utils \
+&& setup_log_directories \
+&& do_sanity_check \
+&& set_input_parameters "${ALL_INPUT_PARAMETERS[@]}" \
+&& set_global_variables \
+&& purge_backups_older_than_max_days \
+&& check_incremental_or_full \
+&& set_base_xtrabackup_arguments \
+&& set_remaining_xtrabackup_arguments \
+&& take_backup

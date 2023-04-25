@@ -1,0 +1,40 @@
+#!/bin/bash
+
+: '
+  THIS SCRIPT IS NOT COMPLETED YET
+'
+
+# Creates a user w.r.t the $1 ($BACKUP_USER_NAME) given, and sets the system up for
+# taking backup. NOTE: this script has to be run as privileged user (sudoer)
+
+if (( "$#" < 1 )) ; then
+  echo "error: Missing 1 argument"
+  echo "syntax: ./backup_setup <backup-user-name>"
+  echo "usage: ./backup_setup backup"
+  echo "If being used in Ubuntu, a user named 'backup' already exists"
+  exit 1
+fi
+
+BACKUP_USER_NAME="${1}"
+
+BASE_BACKUP_DIRECTORY="/backups"
+BASE_DIRECTORY="${BASE_BACKUP_DIRECTORY}/db/mysql"
+BASE_DUMP_DIRECTORY="${BASE_DIRECTORY}/dumps"
+BASE_LOGS_DIRECTORY="${BASE_DIRECTORY}/logs"
+
+# Create the directories if required
+[ ! -d "${BASE_DUMP_DIRECTORY}" ] && mkdir -p "${BASE_DUMP_DIRECTORY}"
+[ ! -d "${BASE_LOGS_DIRECTORY}" ] && mkdir -p "${BASE_LOGS_DIRECTORY}"
+
+# Check if a user already exists with the name $BACKUP_USER_NAME 
+# & create the user if the user doesn't exist
+if id "${BACKUP_USER_NAME}" &>/dev/null ; then
+  echo "Setup for this user has already been done"
+  COMMON_BACKUP_USER_NAME="backup"
+  if [[ "${BACKUP_USER_NAME}" -eq "${COMMON_BACKUP_USER_NAME}" ]] ; then
+    usermod -aG "mysql" "${COMMON_BACKUP_USER_NAME}"
+    usermod -aG "${COMMON_BACKUP_USER_NAME}" "${USER}"
+  fi
+else
+  echo "Setting up new backup user: ${BACKUP_USER_NAME}"
+fi
