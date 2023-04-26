@@ -14,4 +14,4 @@ Backup your data stored in databases like MySQL &amp; MongoDB, and File Systems 
 
 ## Table of Contents
 
-- **[How to backup using Percona Xtrabackup?](./percona-usage-mysql-backup//README.md)**
+- **[How to backup using Percona Xtrabackup?](./percona-usage-mysql-backup/)**
